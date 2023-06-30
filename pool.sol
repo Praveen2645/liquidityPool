@@ -1,17 +1,29 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.20;
 
-import "./IERC20.sol";
+interface IERC20 {
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) external returns (bool);
+
+    function transfer(address recipient, uint256 amount)
+        external
+        returns (bool);
+
+    function balanceOf(address account) external view returns (uint256);
+}
 
 contract LiquidityPool {
     // ERC20 token state variables
-    IERC20 public immutable token1;
-    IERC20 public immutable token2;
+    IERC20 token1;
+    IERC20 token2;
     // State variables for token reserves
     uint256 public reserve1;
     uint256 public reserve2;
-    //for liquidity shares
+    // State variables for liquidity shares
     uint256 public totalLiquidity;
     mapping(address => uint256) public userLiquidity;
 
@@ -42,25 +54,25 @@ contract LiquidityPool {
     }
 
     // Internal function to mint liquidity shares
-    function _mint(address _to, uint256 _amount) internal {
+    function _mint(address _to, uint256 _amount) private {
         userLiquidity[_to] += _amount;
         totalLiquidity += _amount;
     }
 
     // Internal function to burn liquidity shares
-    function _burn(address _from, uint256 _amount) internal {
+    function _burn(address _from, uint256 _amount) private {
         userLiquidity[_from] -= _amount;
         totalLiquidity -= _amount;
     }
 
     // Internal function to update liquidity pool reserves
-    function _update(uint256 _reserve1, uint256 _reserve2) internal {
+    function _update(uint256 _reserve1, uint256 _reserve2) private {
         reserve1 = _reserve1;
         reserve2 = _reserve2;
     }
 
     // Function for user to swap tokens
-    // NOTE: Could possibly make this into 2 functions for gas saving
+
     function swapTokens(address _tokenIn, uint256 _amountIn)
         external
         returns (uint256 _amountOut)
@@ -91,16 +103,6 @@ contract LiquidityPool {
         // Calculate tokenIn with fee of 0.2%
         uint256 _amountInWithFee = (_amountIn * 998) / 1000;
 
-        /*
-        Calculate tokenOut amount using x * y = k
-        > (x + dx) * (y + dy) = k`
-        > y - dy = (xy) / (x + dx)
-        > dy = y - ((xy) / (x + dx))
-        > dy = y * (1 - (x / (x + dx)))
-        > dy = y * (((x + dx) / (x + dx)) - (x / (x + dx)))
-        > dy = y * (dx / (x + dx))
-        ~~~ dy = (y * dx) / (x + dx) ~~~
-        */
         _amountOut =
             (reserveOut * _amountInWithFee) /
             (reserveIn + _amountInWithFee);
@@ -118,56 +120,35 @@ contract LiquidityPool {
     }
 
     // Function for user to add liquidity
-    function addLiquidity(uint256 _amountToken1, uint256 _amountToken2)
+    function addLiquidity(address token, uint256 _amountToken1)
         external
         returns (uint256 _liquidityShares)
     {
-        // User sends both tokens to liquidity pool
-        require(
-            token1.transferFrom(msg.sender, address(this), _amountToken1),
-            "Token Transfer Failed"
-        );
-        require(
-            token2.transferFrom(msg.sender, address(this), _amountToken2),
-            "Token Transfer Failed"
-        );
-
-        /*
-        Check if the ratio of tokens supplied is proportional
-        to reserve ratio to satisfy x * y = k for price to not
-        change if both reserves are greater than 0
-        */
         (uint256 _reserve1, uint256 _reserve2) = getReserves();
-
-        if (_reserve1 > 0 || _reserve2 > 0) {
-            require(
-                _amountToken1 * _reserve2 == _amountToken2 * _reserve1,
-                "Unbalanced Liquidity Provided"
-            );
-        }
-
-        /*
-        Calculate number of liquidity shares to mint using
-        the geometric mean as a measure of liquidity. Increase
-        in liquidity is proportional to increase in shares
-        minted.
-        > S = (dx / x) * TL
-        > S = (dy / y) * TL
-        NOTE: Amount of liquidity shares minted formula is similar
-        to Uniswap V2 formula. For minting liquidity shares, we take
-        the minimum of the two values calculated to incentivize depositing
-        balanced liquidity.
-        */
+        require(_reserve1 > 0 || _reserve2 > 0, "first add some liquidity");
         uint256 _totalLiquidity = totalLiquidity;
-
-        if (_totalLiquidity == 0) {
-            _liquidityShares = sqrt(_amountToken1 * _amountToken2);
-        } else {
-            _liquidityShares = min(
-                ((_amountToken1 * _totalLiquidity) / _reserve1),
-                ((_amountToken2 * _totalLiquidity) / _reserve2)
-            );
+        require(_totalLiquidity > 0, "add some liquidity first");
+        uint256 tokenAmount = 0;
+        uint256 _amountToken2 = 0;
+        // User sends both tokens to liquidity pool
+        if (IERC20(token) == token1) {
+            tokenAmount = this.tokenBvalue(token, _amountToken1);
+            token1.transferFrom(msg.sender, address(this), _amountToken1);
+            token2.transferFrom(msg.sender, address(this), tokenAmount);
+            _amountToken1 = _amountToken1;
+            _amountToken2 = tokenAmount;
+        } else if (IERC20(token) == token2) {
+            tokenAmount = this.tokenBvalue(token, _amountToken1);
+            token1.transferFrom(msg.sender, address(this), tokenAmount);
+            token2.transferFrom(msg.sender, address(this), _amountToken1);
+            _amountToken1 = tokenAmount;
+            _amountToken2 = _amountToken1;
         }
+
+        _liquidityShares = min(
+            ((_amountToken1 * _totalLiquidity) / _reserve1),
+            ((_amountToken2 * _totalLiquidity) / _reserve2)
+        );
 
         require(_liquidityShares > 0, "No Liquidity Shares Minted");
         // Mint shares to user
@@ -182,11 +163,6 @@ contract LiquidityPool {
         emit MintLpToken(msg.sender, _liquidityShares);
     }
 
-    /*
-    Function for user to remove liquidity
-    > dx = (S / TL) * x
-    > dy = (S / TL) * y
-    */
     function removeLiquidity(uint256 _liquidityShares)
         external
         returns (uint256 _amountToken1, uint256 _amountToken2)
@@ -240,8 +216,48 @@ contract LiquidityPool {
     function min(uint256 x, uint256 y) internal pure returns (uint256 z) {
         z = x < y ? x : y;
     }
-    function tokenBvalue( uint token ) public view returns(uint){
+
+    function tokenBvalue(address tokenAddress, uint256 token)
+        external 
+        view
+        returns (uint256)
+    {
+        if (IERC20(tokenAddress) == token1) {
+            (uint256 _reserve1, uint256 _reserve2) = getReserves();
+            return ((token * _reserve2) / _reserve1);
+        } else if (IERC20(tokenAddress) == token2) {
+            return (token * reserve1) / reserve2;
+        } else {
+            revert("invalid address");
+        }
+    }
+
+    function firstTimeLiquidity(uint256 _amountToken1, uint256 _amountToken2)
+        external
+        returns (uint256 _liquidityShares)
+    {
         (uint256 _reserve1, uint256 _reserve2) = getReserves();
-        return ((token * _reserve2)/_reserve1);
+        require(_reserve1 == 0 || _reserve2 == 0, "liquidity already added");
+        uint256 _totalLiquidity = totalLiquidity;
+        require(_totalLiquidity == 0, "liquidity already added");
+        token1.transferFrom(msg.sender, address(this), _amountToken1);
+        require(
+            token2.transferFrom(msg.sender, address(this), _amountToken2),
+            "Token Transfer Failed"
+        );
+
+        _liquidityShares = sqrt(_amountToken1 * _amountToken2);
+
+        require(_liquidityShares > 0, "No Liquidity Shares Minted");
+        // Mint shares to user
+        _mint(msg.sender, _liquidityShares);
+
+        // Update the reserves
+        _update(
+            token1.balanceOf(address(this)),
+            token2.balanceOf(address(this))
+        );
+
+        emit MintLpToken(msg.sender, _liquidityShares);
     }
 }
